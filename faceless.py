@@ -9,8 +9,11 @@ from shutil import copyfile
 
 import in_place
 
-IEX = "iex"
-EXI = "exi"
+IEX: str = "iex"
+EXI: str = "exi"
+EXC: str = "exc"
+INC: str = "inc"
+MODE: str = "op_mode"
 
 
 def default_exclude():
@@ -97,46 +100,35 @@ def static_regexes(full=False):
         start = r"^"
         end = r"$"
     return {
-            "URL": start + r"http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+" + end,
-            "EMAIL": start + r"[a-zA-Z0-9+_\-\.]+@[0-9a-zA-Z][.-0-9a-zA-Z]*.[a-zA-Z]+" + end,
-            "DOMAIN": start + r"(?!:\/\/)([a-zA-Z0-9-_]+\.)*[a-zA-Z0-9][a-zA-Z0-9-_]+\.[a-zA-Z]{2,11}?[a-zA-Z]?" + end,
-            "IP": start + r"(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])" + end,
-            "WINPATH": start + r"([a-zA-Z]:)*\\[\\\S|*\S]?[^\/|\|\<|\>|\?|\:|\*|\"|\:]{4,}" + end
-            }
+        "URL": start + r"http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+" + end,
+        "EMAIL": start + r"[a-zA-Z0-9+_\-\.]+@[0-9a-zA-Z][.-0-9a-zA-Z]*.[a-zA-Z]+" + end,
+        "DOMAIN": start + r"(?!:\/\/)([a-zA-Z0-9-_]+\.)*[a-zA-Z0-9][a-zA-Z0-9-_]+\.[a-zA-Z]{2,11}?[a-zA-Z]?" + end,
+        "IP": start + r"(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])" + end,
+        "WINPATH": start + r"([a-zA-Z]:)*\\[\\\S|*\S]?[^\/|\|\<|\>|\?|\:|\*|\"|\:]{4,}" + end
+    }
 
 
 def reset_filters():
-    filters = {
-        "include": {
-            "DOMAIN": [],
-            "URL": [],
-            "EMAIL": [],
-            "IP": [],
-            "WINPATH": []
-        },
-        "exclude": {
-            "DOMAIN": [],
-            "URL": [],
-            "EMAIL": [],
-            "IP": [],
-            "WINPATH": []
-        },
-        "opmode": {
-            "DOMAIN": EXI,
-            "URL": EXI,
-            "EMAIL": EXI,
-            "IP": EXI,
-            "WINPATH": EXI
-        },
-
-    }
+    filters = dict()
+    for k in static_regexes().keys():
+        filters[k] = {"exc": [], "inc": [], "op_mode": EXI}
     return filters
 
 
-def setopmode(filterstring):
-    if not filterstring:
+def sniff_regex(filter_string):
+    if not filter_string:
+        return None
+    if filter_string.startswith("++"):
+        return INC, 2
+    elif filter_string.startswith("--"):
+        return EXC, 2
+    return INC, 0
+
+
+def get_op_mode(filter_string):
+    if not filter_string:
         return EXI
-    if filterstring.startswith("++"):
+    if filter_string.startswith("++"):
         return IEX
     return EXI
 
@@ -152,27 +144,19 @@ def init_filters(command):
             if key.upper() not in list(static_regexes().keys()) + ["*"]:
                 continue
             filters = raw_filter.split("..")
-            _filters["opmode"][key.upper()] = setopmode(raw_filter)
+            _filters[key.upper()][MODE] = get_op_mode(raw_filter)
             for f in filters:
                 if f.startswith("--"):
-                    _filters["exclude"][key.upper()].append(f[2:])
+                    _filters[key.upper()][EXC].append(f[2:])
                 elif f.startswith("++"):
-                    _filters["include"][key.upper()].append(f[2:])
+                    _filters[key.upper()][INC].append(f[2:])
                 else:
-                    _filters["exclude"][key.upper()].append(f)
+                    _filters[key.upper()][EXC].append(f)
         else:
-            if _check.startswith("--"):
-                mode = "exclude"
-                shift = 2
-            elif _check.startswith("++"):
-                mode = "include"
-                shift = 2
-            else:
-                mode = "include"
-                shift = 0
+            filter_type, shift = sniff_regex(_check)
             for k in static_regexes().keys():
-                _filters["opmode"][k] = setopmode(_check)
-                _filters[mode][k].append(_check)
+                _filters[k][MODE] = get_op_mode(_check)
+                _filters[k][filter_type].append(_check[shift:])
 
     return _filters
 
@@ -201,28 +185,26 @@ def anonymize(file_path, mapping_path, reverse=False):
 
 
 def is_included(line, filters, pattern_name):
-    for f in filters["include"][pattern_name]:
+    for f in filters[pattern_name][INC]:
         if re.search(f, line):
             return True
     return False
 
 
 def is_excluded(line, filters, pattern_name):
-    for f in filters["exclude"][pattern_name]:
+    for f in filters[pattern_name][EXC]:
         if re.search(f, line):
             return True
     return False  # or filters["opmode"][pattern_name] == EXI
 
 
 def is_filtered(line, filters, pattern_name):
-    checked = False
-    filtered = False
     pattern_name = pattern_name.upper()
     if not isinstance(filters, dict):
         return True
-    if not pattern_name in filters["opmode"].keys():
+    if not pattern_name in static_regexes().keys():
         return True
-    if filters["opmode"][pattern_name] == IEX:
+    if filters[pattern_name][MODE] == IEX:
         if is_included(line, filters, pattern_name):
             return not is_excluded(line, filters, pattern_name)
         else:
